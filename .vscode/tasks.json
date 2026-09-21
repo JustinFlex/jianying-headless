@@ -1,0 +1,29 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "剪映：环境检查",
+      "type": "process",
+      "command": "python3",
+      "args": ["${workspaceFolder}/tools/local.py", "doctor"],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    },
+    {
+      "label": "剪映：构建本地桥接",
+      "type": "process",
+      "command": "python3",
+      "args": ["${workspaceFolder}/tools/local.py", "build-codec"],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    },
+    {
+      "label": "剪映：验证草稿与导出",
+      "type": "process",
+      "command": "python3",
+      "args": ["${workspaceFolder}/tools/local.py", "smoke-test", "--export"],
+      "options": {"cwd": "${workspaceFolder}"},
+      "problemMatcher": []
+    }
+  ]
+}

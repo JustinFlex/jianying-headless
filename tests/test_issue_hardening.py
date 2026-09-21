@@ -17,6 +17,7 @@ import runtime_report
 import runtime_io
 import jy14_headless as j
 import native_edit
+import native_export
 
 
 class ToolchainTests(unittest.TestCase):
@@ -56,6 +57,48 @@ class ToolchainTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(ValueError, 'Not the reviewed toolchain'):
                         tc.inspect(Path('/developer'), reproduction)
+
+
+class ExportToolchainTests(unittest.TestCase):
+    def setUp(self):
+        work = ROOT / 'work/export-toolchain-tests'
+        work.mkdir(parents=True, exist_ok=True)
+        self.job = Path(tempfile.mkdtemp(prefix='case-', dir=work))
+
+    def test_export_uses_selected_compiler_sdk_and_clean_environment(self):
+        identity = {'developer_dir': '/reviewed-developer', 'sdk_path': '/reviewed-sdk',
+                    'deployment_target': '26.0'}
+        calls = []
+
+        def compile_fixture(command, **kwargs):
+            calls.append((command, kwargs['env']))
+            Path(command[-1]).write_bytes(b'compiler fixture')
+            return subprocess.CompletedProcess(command, 0, stdout=b'', stderr=b'')
+
+        with patch.dict(native_export.os.environ, {
+                'DEVELOPER_DIR': '/reviewed-developer', 'SDKROOT': '/wrong-sdk',
+                'CPATH': '/injected', 'MACOSX_DEPLOYMENT_TARGET': '99',
+                'DYLD_INSERT_LIBRARIES': '/injected'}), \
+                patch.object(native_export, 'select_toolchain', return_value=(
+                    tc.clean_environment('/reviewed-developer'), identity)) as select, \
+                patch.object(native_export.subprocess, 'run', side_effect=compile_fixture):
+            helper, selected = native_export.compile_helper(self.job)
+        self.assertEqual(select.call_args.args[1], '/reviewed-developer')
+        command, env = calls[0]
+        self.assertEqual(command[command.index('-isysroot') + 1], '/reviewed-sdk')
+        self.assertIn('-mmacosx-version-min=26.0', command)
+        self.assertEqual(env['DEVELOPER_DIR'], '/reviewed-developer')
+        self.assertFalse({'SDKROOT', 'CPATH', 'MACOSX_DEPLOYMENT_TARGET', 'DYLD_INSERT_LIBRARIES'} & env.keys())
+        self.assertEqual(selected, identity)
+        self.assertEqual(helper.read_bytes(), b'compiler fixture')
+
+    def test_unreviewed_toolchain_stops_before_compilation(self):
+        with patch.object(native_export, 'select_toolchain', side_effect=ValueError('wrong compiler')), \
+                patch.object(native_export.subprocess, 'run') as compile_process:
+            with self.assertRaisesRegex(ValueError, 'wrong compiler'):
+                native_export.compile_helper(self.job)
+        compile_process.assert_not_called()
+        self.assertEqual(list(self.job.iterdir()), [])
 
 
 class RuntimeReportTests(unittest.TestCase):
@@ -276,6 +319,30 @@ class AttributePolicyTests(unittest.TestCase):
             with self.subTest(name=name), patch.object(j, 'write'), patch.object(j.subprocess, 'run'), patch.object(j, 'read_xattrs', return_value={name: b'changed'}):
                 with self.assertRaisesRegex(ValueError, name):
                     j.copy_xattrs({name: b'original'}, Path('/unused'), Path('/audit'))
+
+    def test_new_inode_macl_is_preserved_when_source_has_no_label(self):
+        source = {'com.apple.quarantine': b'original-quarantine'}
+        created = {'com.apple.macl': b'kernel-created-label'}
+        copied = dict(source, **created)
+        with patch.object(j, 'write'), patch.object(j.subprocess, 'run'), \
+                patch.object(j, 'read_xattrs', side_effect=[created, copied]):
+            attrs, changes = j.copy_xattrs(source, Path('/unused'), Path('/audit'))
+        self.assertEqual(attrs, copied)
+        self.assertEqual(changes, ['com.apple.macl'])
+
+    def test_macl_cannot_appear_or_change_during_attribute_copy(self):
+        for created in ({}, {'com.apple.macl': b'initial-label'}):
+            with self.subTest(created=created), patch.object(j, 'write'), \
+                    patch.object(j.subprocess, 'run'), \
+                    patch.object(j, 'read_xattrs', side_effect=[created, {'com.apple.macl': b'new-label'}]):
+                with self.assertRaises(ValueError):
+                    j.copy_xattrs({}, Path('/unused'), Path('/audit'))
+
+    def test_existing_source_macl_cannot_be_removed(self):
+        with patch.object(j, 'write'), patch.object(j.subprocess, 'run'), \
+                patch.object(j, 'read_xattrs', side_effect=[{}, {}]):
+            with self.assertRaises(ValueError):
+                j.copy_xattrs({'com.apple.macl': b'source-label'}, Path('/unused'), Path('/audit'))
 
 
 if __name__ == '__main__':

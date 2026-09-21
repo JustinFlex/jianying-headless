@@ -623,6 +623,8 @@ def read_xattrs(path):
 def copy_xattrs(source_attrs, destination, audit):
     """Preserve all user/security attributes; record the OS-owned per-file provenance separately."""
     write(audit / 'index-xattrs-before.json', {k: v.hex() for k, v in source_attrs.items()})
+    created_attrs = read_xattrs(destination)
+    write(audit / 'index-xattrs-created.json', {k: v.hex() for k, v in created_attrs.items()})
     for key, value in source_attrs.items():
         subprocess.run(['/usr/bin/xattr', '-wx', key, value.hex(), str(destination)], check=True, capture_output=True)
     copied = read_xattrs(destination)
@@ -631,7 +633,16 @@ def copy_xattrs(source_attrs, destination, audit):
     # OS assigns a different provenance value to the new inode. Never strip it,
     # quarantine, or any other attribute to force an equality result.
     changed = sorted(k for k in set(source_attrs) | set(copied) if source_attrs.get(k) != copied.get(k))
-    require(not set(changed) - {'com.apple.provenance'},
+    allowed = {'com.apple.provenance'}
+    # macOS may attach an intent label when this new inode is created. If the
+    # source had no label, preserve exactly the one observed BEFORE copying.
+    # This does not parse/forge MACL records or permit an existing source label
+    # to be replaced, extended or removed. Later transaction checks still
+    # require the staged attributes to remain byte-for-byte unchanged.
+    if ('com.apple.macl' not in source_attrs and created_attrs.get('com.apple.macl')
+            and copied.get('com.apple.macl') == created_attrs['com.apple.macl']):
+        allowed.add('com.apple.macl')
+    require(not set(changed) - allowed,
             'Extended attributes could not be preserved before commit: ' + ', '.join(changed)
             + '. No security attribute was stripped. If com.apple.macl differs, this environment '
               'needs a reviewed permission-preservation adapter; do not disable SIP or TCC.')

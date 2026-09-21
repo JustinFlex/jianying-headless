@@ -25,6 +25,9 @@ import native_compound as compound
 from runtime_profiles import EXPORT_PROFILES, validate_export_profiles
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent / 'tools'))
+from build_toolchain import compile_command, select_toolchain
+
 SCHEMA = 'jy14-native-export/v1'
 
 
@@ -425,6 +428,25 @@ def validate_probe(info, settings, duration_us, audio_expected):
             'major_brand': fmt['tags']['major_brand']}
 
 
+def compile_helper(job):
+    """Build with the reviewed compiler AND SDK; the system default can omit tracks."""
+    manifest = j.nd.BACKEND / 'SOURCE_MANIFEST.json'
+    j.require(j.nd.digest(manifest) == j.nd.IO_MANIFEST_SHA, 'Codec source manifest changed')
+    reproduction = j.read_json(manifest)['reproduction_environment']
+    env, toolchain = select_toolchain(reproduction, os.environ.get('DEVELOPER_DIR'))
+    helper = job / 'native-export-helper'
+    command = compile_command(HERE / 'native_export.cpp', j.nd.APP / 'Contents/Frameworks', helper, toolchain)
+    command.insert(2, '-Wno-deprecated-declarations')
+    compiler_tmp = job / 'compiler-tmp'
+    compiler_tmp.mkdir(mode=0o700)
+    env.update(TMPDIR=str(compiler_tmp) + '/', CLANG_MODULE_CACHE_PATH=str(compiler_tmp / 'modules'))
+    result = subprocess.run(command, capture_output=True, timeout=120, env=env)
+    j.write(job / 'compiler.stderr.log', result.stderr)
+    j.require(result.returncode == 0, 'Native export helper compilation failed')
+    os.chmod(helper, 0o700)
+    return helper, toolchain
+
+
 def run(build, out, bitrate=4_000_000, timeout=600):
     build, record, timeline = verified_build(build)
     capabilities = supported_features(timeline)
@@ -450,20 +472,12 @@ def run(build, out, bitrate=4_000_000, timeout=600):
         timeline_hash = j.nd.digest(job / 'timeline.json')
         j.write(job / 'inputs.json', {'files': files, 'timeline_sha256': timeline_hash})
         j.write(job / 'export.sb', sandbox_profile(job))
-        helper = job / 'native-export-helper'
-        frameworks = j.nd.APP / 'Contents/Frameworks'
-        command = ['/usr/bin/xcrun', 'clang++', '-std=c++17', '-arch', 'arm64', '-O2',
-                   '-Wno-deprecated-declarations', str(HERE / 'native_export.cpp'),
-                   '-L' + str(frameworks), '-lvideoeditor', '-Wl,-rpath,' + str(frameworks), '-o', str(helper)]
+        helper, toolchain = compile_helper(job)
+        evidence['toolchain'] = toolchain
         compiler_tmp = job / 'compiler-tmp'
-        compiler_tmp.mkdir(mode=0o700)
         env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'LC_ALL': 'C',
                'TMPDIR': str(compiler_tmp) + '/',
                'CLANG_MODULE_CACHE_PATH': str(compiler_tmp / 'modules')}
-        compile_result = subprocess.run(command, capture_output=True, timeout=120, env=env)
-        j.write(job / 'compiler.stderr.log', compile_result.stderr)
-        j.require(compile_result.returncode == 0, 'Native export helper compilation failed')
-        os.chmod(helper, 0o700)
         evidence['helper_sha256'] = j.nd.digest(helper)
         evidence['adapter_source_sha256'] = j.nd.digest(HERE / 'native_export.cpp')
         output = job / 'render.mp4'
